@@ -2,40 +2,50 @@ package stark
 
 import (
 	"encoding/hex"
+	"fmt"
 	"os"
 	"testing"
+	"time"
+	"runtime"
 	"github.com/ayushn2/go-stark.git/algebra"
 	"github.com/ayushn2/go-stark.git/poly"
 	"github.com/stretchr/testify/assert"
+	"bytes"
 )
 
+// Measure CPU utilization
+func measureCPUUsage() float64 {
+	var cpuUsage float64
+
+
+	numCPU := runtime.NumCPU()
+	start := runtime.NumGoroutine()
+	startTime := time.Now()
+
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(1 * time.Second) // Measure over 1 sec
+		end := runtime.NumGoroutine()
+		elapsed := time.Since(startTime).Seconds()
+		cpuUsage = float64(end-start) / elapsed * 100 / float64(numCPU)
+		close(done)
+	}()
+
+	<-done
+	return cpuUsage
+}
+
+// Measure memory usage
+func measureMemoryUsage() (uint64, uint64) {
+    var memStats runtime.MemStats
+    runtime.ReadMemStats(&memStats)
+    return memStats.Alloc / 1024, memStats.Sys / 1024 // Report both allocated and total system memory in KB
+}
 func TestZKGen(t *testing.T) {
-
-	/*
-		a, g, G, h, H, evalDomain, f, fEvals, fCommitment, fsChannel := GenerateDomainParameters()
-
-		domainParams := &DomainParameters{
-			a,
-			g,
-			G,
-			h,
-			H,
-			evalDomain,
-			f,
-			fEvals,
-			fCommitment,
-		}
-
-		domainParamsJSON, err := domainparamsInstance.MarshalJSON()
-		if err != nil {
-			t.Fatal("failed to serialize domain params to JSON")
-		}
-		err = ioutil.WriteFile("./domainparamsInstance.json", domainParamsJSON, 0711)
-		if err != nil {
-			t.Fatal("failed to serialize domain params to JSON")
-		}
-	*/
 	paramBytes, err := os.ReadFile("domainparams.json")
+	if err != nil {
+		t.Fatal("failed to unmarshal domain params with error :", err)
+	}
 
 	paramsInstance := &DomainParameters{}
 	err = paramsInstance.UnmarshalJSON(paramBytes)
@@ -45,6 +55,11 @@ func TestZKGen(t *testing.T) {
 	_, g, _, _, _, _, f, _, _ := paramsInstance.Trace, paramsInstance.GeneratorG, paramsInstance.SubgroupG, paramsInstance.GeneratorH, paramsInstance.SubgroupH, paramsInstance.EvaluationDomain, paramsInstance.Polynomial, paramsInstance.PolynomialEvaluations, paramsInstance.EvaluationRoot
 	fsChannel := NewChannel()
 	fsChannel.Send(paramsInstance.EvaluationRoot)
+
+	// Measure memory usage before proof generation
+	memBefore, sysBefore := measureMemoryUsage()
+
+	// Parameter generation test
 	t.Run("TestParamGen", func(t *testing.T) {
 		t.Log("Trace length :", len(paramsInstance.Trace))
 		t.Log("Subgroup G generator :", paramsInstance.GeneratorG)
@@ -56,6 +71,8 @@ func TestZKGen(t *testing.T) {
 		t.Log("Merkle Commitment of evaluations :", hex.EncodeToString(paramsInstance.EvaluationRoot))
 		t.Log("Chanel ", hex.EncodeToString(fsChannel.State))
 	})
+
+	// Proof generation and verification test
 	t.Run("TestProve", func(t *testing.T) {
 		f := f.Clone(0)
 
@@ -75,16 +92,10 @@ func TestZKGen(t *testing.T) {
 			t.Fatal("third constraint not verified : wrong evaluation at 31415 , expected :", expected, " got :", actual)
 		}
 
-		// To generate succint proofs we transform the three polynomial validity checks
-		// into one by applying a linear transform [a0,a1,a2]
-		// the composition polynomial is written a0p0 + a1p1 + a2p2
-		// where a0,a1,a2 are random field elements in this case extracted
-		// from the fiat shamir channel
-
+		// To generate succinct proofs we transform the three polynomial validity checks
 		constraints := []poly.Polynomial{quoPolyConstraint1, quoPolyConstraint2, quoPolyConstraint3}
 		compositionPoly := poly.NewPolynomialInts(0)
 		for i := 0; i < 3; i++ {
-
 			randomFE := fsChannel.RandFE(PrimeField.Modulus())
 			comb := constraints[i].Mul(poly.NewPolynomialBigInt(randomFE), PrimeField.Modulus())
 			compositionPoly = compositionPoly.Add(comb, PrimeField.Modulus())
@@ -92,10 +103,8 @@ func TestZKGen(t *testing.T) {
 		t.Log("Composition Polynomial :", compositionPoly)
 
 		// Now we evaluate the composition polynomial on the evaluation domain
-		// and commit to the evaluation
 		compositionPolyEvals := make([]algebra.FieldElement, len(paramsInstance.EvaluationDomain))
 		for idx, elem := range paramsInstance.EvaluationDomain {
-
 			eval := compositionPoly.Eval(elem.Big(), PrimeField.Modulus())
 			compositionPolyEvals[idx] = PrimeField.NewFieldElement(eval)
 		}
@@ -104,8 +113,14 @@ func TestZKGen(t *testing.T) {
 		t.Log("Composition Polynomial Evaluations Root :", hex.EncodeToString(compositionPolyEvalsRoot))
 		fsChannel.Send(compositionPolyEvalsRoot)
 
+		
+
+		// Start timing the proof verification
+		startTime := time.Now()
+
 		friDomains, friPolys, friLayers, friRoots := GenerateFRICommitment(compositionPoly, paramsInstance.EvaluationDomain, compositionPolyEvals, compositionPolyEvalsRoot, *fsChannel)
 
+		// Log FRI layers and roots information
 		assert.Len(t, friLayers, 11)
 		assert.Len(t, friLayers[len(friLayers)-1], 8)
 		expectedLastLayerConstant := PrimeField.NewFieldElementFromInt64(2550486681)
@@ -125,10 +140,127 @@ func TestZKGen(t *testing.T) {
 		}
 		t.Log("Channel Proof", fsChannel.Proof)
 
+		
+
+		// Now perform proof verification
 		cosetEvals := paramsInstance.PolynomialEvaluations
 		FRIDecommit(fsChannel, cosetEvals, friLayers)
 
+		// End timing the proof verification
+		elapsedTime := time.Since(startTime)
+
+		var starkProofBuffer bytes.Buffer
+
+		// Store Merkle roots (commitments)
+		for _, root := range friRoots {
+			starkProofBuffer.Write(root)
+		}
+
+		// Store FRI layers (intermediate proofs)
+		for _, layer := range friLayers {
+			for _, elem := range layer {
+				starkProofBuffer.Write(elem.Big().Bytes())
+			}
+		}
+
+		// Convert fsChannel.Proof (which is []string) into a single []byte
+		for _, proofPart := range fsChannel.Proof {
+			starkProofBuffer.Write([]byte(proofPart)) // Convert each string to []byte
+		}
+
+		// Print the actual zk-STARK proof size
+		fmt.Printf("=== zk-STARK Proof Size ===\n")
+		fmt.Printf("zk-STARK Proof Size (Raw Bytes): %d bytes\n", starkProofBuffer.Len())
+
+		// Log proof size in Go test output
+		t.Logf("zk-STARK Proof Size: %d bytes", starkProofBuffer.Len())
+
+		// Log the proof verification time
+		t.Logf("Proof verification time: %v", elapsedTime)
+
+		// Final proof data
 		t.Log("Final Proof Uncompressed", fsChannel.Proof)
 	})
 
+	// Measure memory usage after proof generation
+	memAfter, sysAfter := measureMemoryUsage()
+
+	// Print memory results
+	fmt.Printf("Memory Usage Before: %d KB, After: %d KB\n", memBefore, memAfter)
+	fmt.Printf("Total System Memory Before: %d KB, After: %d KB\n", sysBefore, sysAfter)
+
+	// Log results
+	t.Logf("Memory Usage Before: %d KB, After: %d KB", memBefore, memAfter)
+	t.Logf("Total System Memory Before: %d KB, After: %d KB", sysBefore, sysAfter)
 }
+
+
+
+func TestProofGenerationTime(t *testing.T) {
+
+	// Measure CPU usage before proof generation
+	cpuBefore := measureCPUUsage()
+	startTimeCPU := time.Now()
+
+	paramBytes, err := os.ReadFile("domainparams.json")
+	if err != nil {
+		t.Fatal("failed to read domainparams.json:", err)
+	}
+
+	paramsInstance := &DomainParameters{}
+	err = paramsInstance.UnmarshalJSON(paramBytes)
+	if err != nil {
+		t.Fatal("failed to unmarshal domain params:", err)
+	}
+
+	_, g, _, _, _, _, f, _, _ := paramsInstance.Trace, paramsInstance.GeneratorG, paramsInstance.SubgroupG, paramsInstance.GeneratorH, paramsInstance.SubgroupH, paramsInstance.EvaluationDomain, paramsInstance.Polynomial, paramsInstance.PolynomialEvaluations, paramsInstance.EvaluationRoot
+	fsChannel := NewChannel()
+	fsChannel.Send(paramsInstance.EvaluationRoot)
+
+	startTime := time.Now()
+
+	f = f.Clone(0)
+
+	quoPolyConstraint1, quoPolyConstraint2, quoPolyConstraint3 := GenerateProgramConstraints(f, g)
+	constraints := []poly.Polynomial{quoPolyConstraint1, quoPolyConstraint2, quoPolyConstraint3}
+
+	compositionPoly := poly.NewPolynomialInts(0)
+	for i := 0; i < 3; i++ {
+		randomFE := fsChannel.RandFE(PrimeField.Modulus())
+		comb := constraints[i].Mul(poly.NewPolynomialBigInt(randomFE), PrimeField.Modulus())
+		compositionPoly = compositionPoly.Add(comb, PrimeField.Modulus())
+	}
+
+	compositionPolyEvals := make([]algebra.FieldElement, len(paramsInstance.EvaluationDomain))
+	for idx, elem := range paramsInstance.EvaluationDomain {
+		eval := compositionPoly.Eval(elem.Big(), PrimeField.Modulus())
+		compositionPolyEvals[idx] = PrimeField.NewFieldElement(eval)
+	}
+	compositionPolyEvalsRoot := DomainHash(compositionPolyEvals)
+
+	GenerateFRICommitment(compositionPoly, paramsInstance.EvaluationDomain, compositionPolyEvals, compositionPolyEvalsRoot, *fsChannel)
+
+	elapsedTime := time.Since(startTime)
+	fmt.Printf("Proof generation time: %v\n", elapsedTime)
+
+	t.Logf("Proof generated successfully in %v", elapsedTime)
+
+	// Measure CPU usage after proof generation
+	cpuAfter := measureCPUUsage()
+	elapsedTimeCPU := time.Since(startTimeCPU)
+
+	// Print CPU results
+	fmt.Printf("=== zk-STARK CPU Utilization ===\n")
+	fmt.Printf("Proof Generation Time: %v\n", elapsedTimeCPU)
+	fmt.Printf("CPU Usage Before: %.2f%%\n", cpuBefore)
+	fmt.Printf("CPU Usage After: %.2f%%\n", cpuAfter)
+
+	// Log results in Go test output
+	t.Logf("Proof generated successfully in %v", elapsedTimeCPU)
+	t.Logf("CPU Usage Before: %.2f%%, After: %.2f%%", cpuBefore, cpuAfter)
+
+	
+
+	
+}
+
