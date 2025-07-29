@@ -67,6 +67,12 @@ func TestZKGen(t *testing.T) {
 		t.Log("Subgroup H generator : ", paramsInstance.GeneratorH)
 		t.Log("Subgroup order :", len(paramsInstance.SubgroupH))
 		t.Log("Polynomial :", paramsInstance.Polynomial.String())
+		// Save polynomial to a file
+		err := os.WriteFile("polynomial_output.txt", []byte(paramsInstance.Polynomial.String()), 0644)
+		if err != nil {
+			t.Fatal("failed to write polynomial to file:", err)
+		}
+
 		t.Log("Eval domain order :", len(paramsInstance.EvaluationDomain))
 		t.Log("Merkle Commitment of evaluations :", hex.EncodeToString(paramsInstance.EvaluationRoot))
 		t.Log("Chanel ", hex.EncodeToString(fsChannel.State))
@@ -85,6 +91,16 @@ func TestZKGen(t *testing.T) {
 		if quoPolyConstraint2.Eval(algebra.FromInt64(5772), PrimeField.Modulus()).Cmp(algebra.FromInt64(232961446)) != 0 {
 			t.Fatal("second constraint not verified : wrong evaluation at 5772")
 		}
+
+		// Verify the third constraint
+		// The expected value is calculated based on the polynomial evaluation at x = 31415
+		// This value should match the expected output of the third constraint polynomial
+		// which is derived from the program constraints defined in GenerateProgramConstraints
+		// The expected value is 2090051528, which is the result of evaluating
+		// the third polynomial at x = 31415 in the finite field defined by PrimeField.Modulus()
+		// This is a crucial step to ensure the integrity of the zk-STARK proof generation
+		// and verification process, as it confirms that the polynomial constraints are correctly
+		// defined and evaluated.
 
 		expected := algebra.FromInt64(2090051528)
 		actual := quoPolyConstraint3.Eval(algebra.FromInt64(31415), PrimeField.Modulus())
@@ -259,8 +275,5 @@ func TestProofGenerationTime(t *testing.T) {
 	t.Logf("Proof generated successfully in %v", elapsedTimeCPU)
 	t.Logf("CPU Usage Before: %.2f%%, After: %.2f%%", cpuBefore, cpuAfter)
 
-	
-
-	
 }
 
